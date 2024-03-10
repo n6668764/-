@@ -1,0 +1,138 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
+#include <SPI.h>
+
+#define TFT_SCLK  18  // 时钟引脚
+#define TFT_MOSI  23  // 数据输出引脚
+#define TFT_RST    4  // 复位引脚
+#define TFT_DC   2   // 数据/命令选择引脚
+#define TFT_CS    5   // 片选引脚
+
+#define TFT_WIDTH  160
+#define TFT_HEIGHT 128
+
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_SCLK, TFT_MOSI, TFT_RST); 
+
+const int ecgPin = 34; // AD8232模拟输入引脚
+
+unsigned long lastRPeakTime = 0; // 上一个R波峰值时间
+unsigned long totalRRInterval = 0; // 所有R-R间隔时间的累加值
+unsigned int numRPeaks = 0; // R波的数量
+int heartRate = 0; // 心率
+
+// 低通滤波器参数
+const float alpha = 0.9;
+static int lastFilteredValue = 0;
+
+// R波检测参数
+#define R_PEAK_THRESHOLD 2300 // R波峰值的阈值
+#define RPeakInterval 500 // R波间隔，单位毫秒
+
+// 函数声明
+void drawECGWaveform(int value);
+int lowPassFilter(int value);
+void detectRPeak(int value);
+void calculateHeartRate();
+void drawMonitorScreen();
+
+void setup() {
+  Serial.begin(115200);
+  
+  tft.initR(INITR_BLACKTAB);
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setRotation(1);
+
+  // 绘制监护仪界面
+  drawMonitorScreen();
+}
+
+void loop() {
+  // 读取心电信号
+  int ecgValue = analogRead(ecgPin);
+  
+  // 应用低通滤波器滤波
+  int filteredValue = lowPassFilter(ecgValue);
+
+  // 绘制心电波形
+  drawECGWaveform(filteredValue);
+
+  // 检测R波
+  detectRPeak(filteredValue);
+
+  // 计算心率
+  calculateHeartRate();
+
+  delay(10); // 调整延迟时间
+}
+
+void drawMonitorScreen() {
+  // 绘制边框
+  tft.drawRect(0, 0, 50, 40, ST77XX_WHITE);
+  tft.drawRect(50, 0, 50, 40, ST77XX_WHITE);
+  tft.drawRect(100, 0, 60, 40, ST77XX_WHITE);
+  
+  // 显示心率标题
+  tft.setTextSize(1);
+  tft.setCursor(2, 10);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(" bpm");
+}
+
+int lowPassFilter(int value) {
+  int filteredValue = alpha * value + (1 - alpha) * lastFilteredValue;
+  lastFilteredValue = filteredValue;
+  return filteredValue;
+}
+
+void drawECGWaveform(int value) {
+  // 在波形区域绘制心电波形
+  static int xPos = 0;
+  static int lastValue = TFT_HEIGHT / 3; // 初始位置为屏幕中间
+
+  int yPos = map(value, 0, 4095, TFT_HEIGHT, 50);
+
+  // 绘制波形
+  tft.drawLine(xPos, lastValue, xPos + 1, yPos, ST77XX_WHITE);
+
+  // 更新波形位置和上一个值
+  xPos++;
+  if (xPos >= TFT_WIDTH) {
+    xPos = 0;
+    tft.fillRect(0, TFT_HEIGHT / 3, TFT_WIDTH, TFT_HEIGHT * 2 / 3, ST77XX_BLACK); // 清空波形区域
+  }
+  lastValue = yPos;
+}
+
+void detectRPeak(int value) {
+  // 检测R波峰值
+  if (value > R_PEAK_THRESHOLD) {
+    unsigned long currentTime = millis();
+    unsigned long timeSinceLastRPeak = currentTime - lastRPeakTime;
+    if (timeSinceLastRPeak > RPeakInterval) {
+      totalRRInterval += timeSinceLastRPeak;
+      numRPeaks++;
+      lastRPeakTime = currentTime;
+    }
+  }
+
+}
+
+void calculateHeartRate() {
+  if (numRPeaks > 0) {
+    // 计算平均R-R间隔时间
+    unsigned long averageRRInterval = totalRRInterval / numRPeaks;
+    
+    // 将平均R-R间隔时间转换为心率（每分钟为单位）
+    heartRate = 60000 / averageRRInterval;
+  } else {
+    heartRate = 0; // 如果没有检测到R波，则将心率设为零
+  }
+   
+  tft.fillRect(10, 20, 20, 10, ST77XX_BLACK); // 清除上次心率显示
+
+  // 显示心率
+  tft.setTextSize(1);
+  tft.setCursor(10, 20);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(heartRate);
+}
