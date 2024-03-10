@@ -1,0 +1,179 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+#include <WiFiManager.h>
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
+#include <U8x8lib.h>
+// 定义屏幕尺寸
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// 定义SDA和SCL引脚
+#define OLED_RESET  -1
+
+
+// 初始化屏幕对象
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// 定义倒计时时间变量
+int countdownTime = 0;
+
+// 定义滑动变阻器和按键开关的引脚
+int potentiometerPin = A0;
+int button1Pin = D5;
+int button2Pin = D6;
+int button3Pin = D7;
+int stop = D0;
+bool program1Running = false;
+bool program2Running = false;
+bool program3Running = false;
+
+void setup() {
+  // 初始化屏幕
+  Serial.begin(115200);
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  display.display();  // 显示缓冲区内容
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0,0);
+  display.println("1. The countdown is suffocating 1-1024s");
+  display.println("2. Random countdown suffocation 8-31s");
+  display.println("3. punnish mode");
+  display.display();
+
+  
+  pinMode(stop, INPUT_PULLUP);
+  pinMode(button1Pin, INPUT_PULLUP);
+  pinMode(button2Pin, INPUT_PULLUP);
+  pinMode(button3Pin, INPUT_PULLUP);
+}
+
+void loop() {
+  int stopState= digitalRead(stop);
+  int button1State = digitalRead(button1Pin);
+  int button2State = digitalRead(button2Pin);
+  int button3State = digitalRead(button2Pin);
+  if (!program1Running && !program2Running&&!program3Running) { 
+    if (button1State == LOW) {
+      display.clearDisplay();
+      display.setCursor(0,0);
+      display.println("倒计时窒息1-1024s");
+      display.display();
+      delay(2000);
+      program1Running = true;  // 标记为程序1正在运行
+    } 
+    else if (button2State == LOW) {
+      display.clearDisplay();
+      display.setCursor(0,0);
+      display.println("Random countdown suffocation 6-31s");
+      display.display();
+      delay(2000);
+      program2Running = true;  // 标记为程序2正在运行
+
+    }else if (button3State == LOW) {
+      display.clearDisplay();
+      display.setCursor(0,0);
+      display.println("punnish mode");
+      display.display();
+      delay(2000);
+      program2Running = true;  // 标记为程序3正在运行
+    }
+
+  }
+
+  if (program1Running) {
+    // Program 1 logic here
+    int sensorValue = analogRead(potentiometerPin);
+    // 显示滑动变阻器数值
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.print("Time: ");
+    display.println(sensorValue);
+    display.display();
+
+    // 读取按钮状态
+    if(digitalRead(button1Pin) == LOW) {
+      // 按下按钮1，倒计时开始
+      countdownTime = sensorValue;
+      while(countdownTime > 0) {
+        display.clearDisplay();
+        display.setCursor(0,0);
+        display.print("Countdown: ");
+        display.println(countdownTime);
+        display.display();
+        delay(1000);
+        countdownTime--;
+        GPIO_OUTPUT_SET(GPIO_ID_PIN(2),0);
+        display.print("done");
+        display.display();
+      }
+      delay(1000);
+      if(display.print("Time: ")) {
+        GPIO_OUTPUT_SET(GPIO_ID_PIN(2),1);
+        
+
+      }
+      
+    }
+  }
+
+  if (program2Running) {
+
+   int countdownTime = random(6, 31);  // 生成12到31之间的随机数
+      while(countdownTime > 0) {
+        display.clearDisplay();
+        display.setCursor(0,0);
+        display.print("Countdown: ");
+        display.println(countdownTime);
+        display.display();
+        delay(1000);
+        countdownTime--;
+        GPIO_OUTPUT_SET(GPIO_ID_PIN(2),0);
+        
+      }
+      
+      GPIO_OUTPUT_SET(GPIO_ID_PIN(2),1);
+      delay(5000);
+      
+      if(display.print("Time: ")) {
+        GPIO_OUTPUT_SET(GPIO_ID_PIN(2),1);
+      
+      }
+      
+    }
+  
+  if (program3Running) {
+
+   int countdownTime = random(6, 31);  // 生成12到31之间的随机数
+      while(countdownTime > 0) {
+        display.clearDisplay();
+        display.setCursor(0,0);
+        display.print("Countdown: ");
+        display.println(countdownTime);
+        display.display();
+        delay(1000);
+        countdownTime--;
+        GPIO_OUTPUT_SET(GPIO_ID_PIN(2),0);
+        GPIO_OUTPUT_SET(GPIO_ID_PIN(15),0);
+      }
+      delay(5000);
+      GPIO_OUTPUT_SET(GPIO_ID_PIN(2),1);
+      GPIO_OUTPUT_SET(GPIO_ID_PIN(15),1);
+
+      delay(5000);
+      GPIO_OUTPUT_SET(GPIO_ID_PIN(2),1);
+      GPIO_OUTPUT_SET(GPIO_ID_PIN(15),1);
+      if(display.print("Time: ")) {
+        GPIO_OUTPUT_SET(GPIO_ID_PIN(2),1);
+        GPIO_OUTPUT_SET(GPIO_ID_PIN(15),1);
+
+      }
+      
+    }
+
+}
