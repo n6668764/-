@@ -1,6 +1,9 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <SPI.h>
+#include <Wire.h>
+#include "MAX30105.h"
+#include "spo2_algorithm.h"
 
 #define TFT_SCLK  18  // 时钟引脚
 #define TFT_MOSI  23  // 数据输出引脚
@@ -28,7 +31,21 @@ static int lastFilteredValue = 0;
 #define R_PEAK_THRESHOLD 2300 // R波峰值的阈值
 #define RPeakInterval 500 // R波间隔，单位毫秒
 
-// 函数声明
+MAX30105 particleSensor;
+
+uint32_t irBuffer[100]; //infrared LED sensor data
+uint32_t redBuffer[100];  //red LED sensor data
+int32_t bufferLength = 100; //data length
+int32_t spo2; //SPO2 value
+int8_t validSPO2; //indicator to show if the SPO2 calculation is valid
+
+// Task handles
+TaskHandle_t taskHeartRateHandle;
+TaskHandle_t taskSpo2Handle;
+
+// Function prototypes
+void taskHeartRate(void *parameter);
+void taskSpo2(void *parameter);
 void drawECGWaveform(int value);
 int lowPassFilter(int value);
 void detectRPeak(int value);
@@ -42,40 +59,102 @@ void setup() {
   tft.fillScreen(ST77XX_BLACK);
   tft.setRotation(1);
 
-  // 绘制监护仪界面
+  // Draw monitor screen
   drawMonitorScreen();
+  
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    Serial.println(F("MAX30102 was not found. Please check wiring/power."));
+    while (1);
+  }
+  byte ledBrightness = 60; //Options: 0=Off to 255=50mA
+  byte sampleAverage = 4; //Options: 1, 2, 4, 8, 16, 32
+  byte ledMode = 2; //Options: 1 = Red only, 2 = Red + IR, 3 = Red + IR + Green
+  byte sampleRate = 200; //Options: 50, 100, 200, 400, 800, 1000, 1600, 3200
+  int pulseWidth = 411; //Options: 69, 118, 215, 411
+  int adcRange = 4096; //Options: 2048, 4096, 8192, 16384
+  // Configure sensor
+  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
+
+  // Create heart rate task and bind it to core 1
+  xTaskCreatePinnedToCore(
+    taskHeartRate,            // Task function
+    "HeartRateTask",          // Task name
+    10000,                    // Stack size (bytes)
+    NULL,                     // Task parameters
+    1,                        // Task priority
+    &taskHeartRateHandle,     // Task handle
+    1);                       // Core number
+
+  // Create SpO2 task and bind it to core 0
+  xTaskCreatePinnedToCore(
+    taskSpo2,                 // Task function
+    "SpO2Task",               // Task name
+    10000,                    // Stack size (bytes)
+    NULL,                     // Task parameters
+    1,                        // Task priority
+    &taskSpo2Handle,          // Task handle
+    0);                       // Core number
 }
 
 void loop() {
-  // 读取心电信号
-  int ecgValue = analogRead(ecgPin);
-  
-  // 应用低通滤波器滤波
-  int filteredValue = lowPassFilter(ecgValue);
-
-  // 绘制心电波形
-  drawECGWaveform(filteredValue);
-
-  // 检测R波
-  detectRPeak(filteredValue);
-
-  // 计算心率
-  calculateHeartRate();
-
-  delay(10); // 调整延迟时间
+  // Nothing to do here
 }
 
-void drawMonitorScreen() {
-  // 绘制边框
-  tft.drawRect(0, 0, 50, 40, ST77XX_WHITE);
-  tft.drawRect(50, 0, 50, 40, ST77XX_WHITE);
-  tft.drawRect(100, 0, 60, 40, ST77XX_WHITE);
+void taskHeartRate(void *parameter) {
+  int ecgValue;
+  int filteredValue;
+
+  for (;;) {
+    ecgValue = analogRead(ecgPin);
+    filteredValue = lowPassFilter(ecgValue);
+    drawECGWaveform(filteredValue);
+    detectRPeak(filteredValue);
+    calculateHeartRate();
+    vTaskDelay(pdMS_TO_TICKS(10)); // Delay for 10 milliseconds
+  }
+}
+
+void taskSpo2(void *parameter) {
+  for (;;) {
+    for (byte i = 0 ; i < bufferLength ; i++) {
+      while (!particleSensor.available())
+        particleSensor.check();
+
+      redBuffer[i] = particleSensor.getRed();
+      irBuffer[i] = particleSensor.getIR();
+      particleSensor.nextSample();
+    }
+
+    int32_t localSpo2;
+    int8_t localValidSPO2;
+    int32_t heartRate;
+    int8_t validHeartRate;
+
+    maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &localSpo2, &localValidSPO2, &heartRate, &validHeartRate);
+
   
-  // 显示心率标题
-  tft.setTextSize(1);
-  tft.setCursor(2, 10);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.print(" bpm");
+    tft.setTextSize(1);
+    tft.setCursor(60, 20);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print(localSpo2);
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for 1 second
+  }
+}
+
+void drawECGWaveform(int value) {
+  static int xPos = 0;
+  static int lastValue = TFT_HEIGHT / 3;
+
+  int yPos = map(value, 0, 4095, TFT_HEIGHT, 50);
+
+  tft.drawLine(xPos, lastValue, xPos + 1, yPos, ST77XX_WHITE);
+
+  xPos++;
+  if (xPos >= TFT_WIDTH) {
+    xPos = 0;
+    tft.fillRect(0, TFT_HEIGHT / 3, TFT_WIDTH, TFT_HEIGHT * 2 / 3, ST77XX_BLACK);
+  }
+  lastValue = yPos;
 }
 
 int lowPassFilter(int value) {
@@ -84,27 +163,7 @@ int lowPassFilter(int value) {
   return filteredValue;
 }
 
-void drawECGWaveform(int value) {
-  // 在波形区域绘制心电波形
-  static int xPos = 0;
-  static int lastValue = TFT_HEIGHT / 3; // 初始位置为屏幕中间
-
-  int yPos = map(value, 0, 4095, TFT_HEIGHT, 50);
-
-  // 绘制波形
-  tft.drawLine(xPos, lastValue, xPos + 1, yPos, ST77XX_WHITE);
-
-  // 更新波形位置和上一个值
-  xPos++;
-  if (xPos >= TFT_WIDTH) {
-    xPos = 0;
-    tft.fillRect(0, TFT_HEIGHT / 3, TFT_WIDTH, TFT_HEIGHT * 2 / 3, ST77XX_BLACK); // 清空波形区域
-  }
-  lastValue = yPos;
-}
-
 void detectRPeak(int value) {
-  // 检测R波峰值
   if (value > R_PEAK_THRESHOLD) {
     unsigned long currentTime = millis();
     unsigned long timeSinceLastRPeak = currentTime - lastRPeakTime;
@@ -114,25 +173,32 @@ void detectRPeak(int value) {
       lastRPeakTime = currentTime;
     }
   }
-
 }
 
 void calculateHeartRate() {
   if (numRPeaks > 0) {
-    // 计算平均R-R间隔时间
     unsigned long averageRRInterval = totalRRInterval / numRPeaks;
-    
-    // 将平均R-R间隔时间转换为心率（每分钟为单位）
     heartRate = 60000 / averageRRInterval;
   } else {
-    heartRate = 0; // 如果没有检测到R波，则将心率设为零
+    heartRate = 0;
   }
    
-  tft.fillRect(10, 20, 20, 10, ST77XX_BLACK); // 清除上次心率显示
-
-  // 显示心率
+  tft.fillRect(10, 20, 20, 10, ST77XX_BLACK);
   tft.setTextSize(1);
   tft.setCursor(10, 20);
   tft.setTextColor(ST77XX_WHITE);
   tft.print(heartRate);
+}
+
+void drawMonitorScreen() {
+  tft.drawRect(0, 0, 50, 40, ST77XX_WHITE);
+  tft.drawRect(50, 0, 50, 40, ST77XX_WHITE);
+  tft.drawRect(100, 0, 60, 40, ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(2, 10);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(" bpm");
+  tft.setCursor(50, 10);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(" spo2");
 }
