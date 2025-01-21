@@ -43,6 +43,10 @@ int8_t validSPO2; //indicator to show if the SPO2 calculation is valid
 TaskHandle_t taskHeartRateHandle;
 TaskHandle_t taskSpo2Handle;
 
+// Semaphore handles
+SemaphoreHandle_t screenMutex;
+SemaphoreHandle_t i2cMutex;
+
 // Function prototypes
 void taskHeartRate(void *parameter);
 void taskSpo2(void *parameter);
@@ -61,39 +65,43 @@ void setup() {
 
   // Draw monitor screen
   drawMonitorScreen();
+
+  screenMutex = xSemaphoreCreateMutex();  // 创建互斥量
+  i2cMutex = xSemaphoreCreateMutex();    // 创建 I2C 互斥量
   
   if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
     Serial.println(F("MAX30102 was not found. Please check wiring/power."));
     while (1);
   }
-  byte ledBrightness = 60; //Options: 0=Off to 255=50mA
-  byte sampleAverage = 4; //Options: 1, 2, 4, 8, 16, 32
-  byte ledMode = 2; //Options: 1 = Red only, 2 = Red + IR, 3 = Red + IR + Green
-  byte sampleRate = 200; //Options: 50, 100, 200, 400, 800, 1000, 1600, 3200
-  int pulseWidth = 411; //Options: 69, 118, 215, 411
-  int adcRange = 4096; //Options: 2048, 4096, 8192, 16384
+  byte ledBrightness = 60; 
+  byte sampleAverage = 4;
+  byte ledMode = 2;
+  byte sampleRate = 200;
+  int pulseWidth = 411;
+  int adcRange = 4096;
+  
   // Configure sensor
   particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
 
   // Create heart rate task and bind it to core 1
   xTaskCreatePinnedToCore(
-    taskHeartRate,            // Task function
-    "HeartRateTask",          // Task name
-    10000,                    // Stack size (bytes)
-    NULL,                     // Task parameters
-    1,                        // Task priority
-    &taskHeartRateHandle,     // Task handle
-    1);                       // Core number
+    taskHeartRate,            
+    "HeartRateTask",          
+    10000,                    
+    NULL,                     
+    1,                        
+    &taskHeartRateHandle,     
+    1);                       
 
   // Create SpO2 task and bind it to core 0
   xTaskCreatePinnedToCore(
-    taskSpo2,                 // Task function
-    "SpO2Task",               // Task name
-    10000,                    // Stack size (bytes)
-    NULL,                     // Task parameters
-    1,                        // Task priority
-    &taskSpo2Handle,          // Task handle
-    0);                       // Core number
+    taskSpo2,                 
+    "SpO2Task",               
+    10000,                    
+    NULL,                     
+    1,                        
+    &taskSpo2Handle,          
+    0);                       
 }
 
 void loop() {
@@ -110,19 +118,30 @@ void taskHeartRate(void *parameter) {
     drawECGWaveform(filteredValue);
     detectRPeak(filteredValue);
     calculateHeartRate();
+
+    // 在更新屏幕时加锁
+    if (xSemaphoreTake(screenMutex, portMAX_DELAY) == pdTRUE) {
+      calculateHeartRate();  // 更新心率显示
+      xSemaphoreGive(screenMutex);  // 释放锁
+    }
+
     vTaskDelay(pdMS_TO_TICKS(10)); // Delay for 10 milliseconds
   }
 }
 
 void taskSpo2(void *parameter) {
   for (;;) {
-    for (byte i = 0 ; i < bufferLength ; i++) {
-      while (!particleSensor.available())
-        particleSensor.check();
+    // 在I2C总线读取时加锁
+    if (xSemaphoreTake(i2cMutex, portMAX_DELAY) == pdTRUE) {
+      for (byte i = 0; i < bufferLength; i++) {
+        while (!particleSensor.available())
+          particleSensor.check();
 
-      redBuffer[i] = particleSensor.getRed();
-      irBuffer[i] = particleSensor.getIR();
-      particleSensor.nextSample();
+        redBuffer[i] = particleSensor.getRed();
+        irBuffer[i] = particleSensor.getIR();
+        particleSensor.nextSample();
+      }
+      xSemaphoreGive(i2cMutex);  // 释放 I2C 互斥量
     }
 
     int32_t localSpo2;
@@ -132,11 +151,15 @@ void taskSpo2(void *parameter) {
 
     maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &localSpo2, &localValidSPO2, &heartRate, &validHeartRate);
 
-  
-    tft.setTextSize(1);
-    tft.setCursor(60, 20);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.print(localSpo2);
+    // 在更新屏幕时加锁
+    if (xSemaphoreTake(screenMutex, portMAX_DELAY) == pdTRUE) {
+      tft.setTextSize(1);
+      tft.setCursor(60, 20);
+      tft.setTextColor(ST77XX_WHITE);
+      tft.print(localSpo2);  // 更新 SpO2 显示
+      xSemaphoreGive(screenMutex);  // 释放锁
+    }
+
     vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for 1 second
   }
 }
